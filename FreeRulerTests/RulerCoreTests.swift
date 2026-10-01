@@ -5,6 +5,270 @@ import XCTest
 
 final class RulerCoreTests: XCTestCase {
 
+    func testArbitraryRotationPreservesOriginAndLengthsForEveryCorner() {
+        for corner in [ZeroCorner.topLeft, .topRight, .bottomLeft, .bottomRight] {
+            let controller = RulerController(state: RulerInstanceState(
+                settings: RulerSettings(zeroCorner: corner),
+                layout: RulerLayoutState(zeroPoint: NSPoint(x: 700, y: 600),
+                                         horizontalLength: 400, verticalLength: 300)
+            ))
+            for angle: CGFloat in [37.5, -123, 90, 0, 22] {
+                controller.setRotation(angle)
+                XCTAssertEqual(controller.rulerWindow.zeroPoint().x, 700, accuracy: 0.001, "corner=\(corner), angle=\(angle)")
+                XCTAssertEqual(controller.rulerWindow.zeroPoint().y, 600, accuracy: 0.001, "corner=\(corner), angle=\(angle)")
+                controller.captureCurrentState()
+                XCTAssertEqual(controller.state.layout.horizontalLength, 400, accuracy: 0.001, "corner=\(corner), angle=\(angle)")
+                XCTAssertEqual(controller.state.layout.verticalLength, 300, accuracy: 0.001, "corner=\(corner), angle=\(angle)")
+                XCTAssertEqual(controller.state.layout.rotationDegrees, angle)
+            }
+        }
+    }
+
+    func testRotationProjectsMouseLocationOntoRulerAxis() {
+        let controller = RulerController(state: RulerInstanceState(
+            settings: RulerSettings(),
+            layout: RulerLayoutState(zeroPoint: NSPoint(x: 700, y: 600),
+                                     horizontalLength: 400, verticalLength: 300)
+        ))
+        controller.setRotation(45)
+        let rule = controller.rulerWindow.horizontalRule
+        let local = NSPoint(x: 123, y: 20)
+        let screen = controller.rulerWindow.convertPoint(toScreen: rule.convert(local, to: nil))
+        rule.drawMouseTick(at: screen)
+        XCTAssertEqual(rule.mouseTickX, 123, accuracy: 0.001)
+        controller.updateDimensions(horizontalLength: 500, verticalLength: 350)
+        XCTAssertEqual(controller.state.layout.rotationDegrees, 45)
+        XCTAssertEqual(controller.rulerWindow.zeroPoint().x, 700, accuracy: 0.001)
+        XCTAssertEqual(controller.rulerWindow.zeroPoint().y, 600, accuracy: 0.001)
+    }
+
+    func testRotatedResizeProjectsDragAndKeepsOriginFixed() throws {
+        for corner in [ZeroCorner.topLeft, .topRight, .bottomLeft, .bottomRight] {
+            for orientation in [Orientation.horizontal, .vertical] {
+                let controller = RulerController(state: RulerInstanceState(
+                    settings: RulerSettings(zeroCorner: corner),
+                    layout: RulerLayoutState(zeroPoint: NSPoint(x: 700, y: 600),
+                                             horizontalLength: 400, verticalLength: 300)
+                ))
+                controller.setRotation(37.5)
+                let window = controller.rulerWindow
+                let rule: RuleView = orientation == .horizontal ? window.horizontalRule : window.verticalRule
+                let handle = try XCTUnwrap(resizeHandle(in: rule))
+                let start = window.convertPoint(toScreen: handle.convert(
+                    NSPoint(x: handle.bounds.midX, y: handle.bounds.midY), to: nil))
+                handle.mouseDown(with: mouseEvent(type: .leftMouseDown,
+                    location: window.convertPoint(fromScreen: start), windowNumber: window.windowNumber, timestamp: 0))
+                let radians: CGFloat = 37.5 * .pi / 180
+                let sign: CGFloat = ZeroCornerGeometry(zeroCorner: corner).growthDirection(for: orientation) == .positive ? 1 : -1
+                let localX: CGFloat = orientation == .horizontal ? 80 * sign : 0
+                let localY: CGFloat = orientation == .vertical ? 80 * sign : 0
+                let target = NSPoint(x: start.x + localX * cos(radians) - localY * sin(radians),
+                                     y: start.y + localX * sin(radians) + localY * cos(radians))
+                handle.mouseDragged(with: mouseEvent(type: .leftMouseDragged,
+                    location: window.convertPoint(fromScreen: target), windowNumber: window.windowNumber, timestamp: 0.1))
+                XCTAssertEqual(controller.state.layout.horizontalLength, orientation == .horizontal ? 480 : 400, accuracy: 0.001)
+                XCTAssertEqual(controller.state.layout.verticalLength, orientation == .vertical ? 380 : 300, accuracy: 0.001)
+                XCTAssertEqual(window.zeroPoint().x, 700, accuracy: 0.001)
+                XCTAssertEqual(window.zeroPoint().y, 600, accuracy: 0.001)
+                handle.mouseUp(with: mouseEvent(type: .leftMouseUp,
+                    location: window.convertPoint(fromScreen: target), windowNumber: window.windowNumber, timestamp: 0.2))
+            }
+        }
+    }
+
+    func testRotatedScreenFrameUsesScreenCoordinatesWithoutChangingLengths() {
+        let controller = RulerController(state: RulerInstanceState(
+            settings: RulerSettings(),
+            layout: RulerLayoutState(zeroPoint: NSPoint(x: 700, y: 600),
+                                     horizontalLength: 400, verticalLength: 300)
+        ))
+        controller.setRotation(45)
+        let window = controller.rulerWindow
+        let frame = window.screenFrame(for: .horizontal)
+        XCTAssertEqual(frame.width, 440 / sqrt(2), accuracy: 0.001)
+        XCTAssertEqual(frame.height, 440 / sqrt(2), accuracy: 0.001)
+        XCTAssertEqual(window.length(for: .horizontal), 400)
+        XCTAssertEqual(window.length(for: .vertical), 300)
+        controller.captureCurrentState()
+        XCTAssertEqual(controller.state.layout.horizontalLength, 400)
+        XCTAssertEqual(controller.state.layout.verticalLength, 300)
+    }
+
+    func testRotationWindowConstraintsFollowExistingArmLimits() {
+        let controller = RulerController(state: RulerInstanceState(
+            settings: RulerSettings(),
+            layout: RulerLayoutState(zeroPoint: NSPoint(x: 700, y: 600),
+                                     horizontalLength: 400, verticalLength: 300)
+        ))
+        let window = controller.rulerWindow
+        let minimum = window.minSize
+        let maximum = window.maxSize
+        controller.setRotation(45)
+        XCTAssertEqual(window.minSize.width, floor((minimum.width + minimum.height) / sqrt(2)))
+        XCTAssertEqual(window.maxSize.width, ceil((maximum.width + maximum.height) / sqrt(2)))
+        controller.updateDimensions(horizontalLength: 0, verticalLength: 10000)
+        XCTAssertEqual(controller.state.layout.horizontalLength, 200)
+        XCTAssertEqual(controller.state.layout.verticalLength, 4000)
+        controller.setRotation(0)
+        XCTAssertEqual(window.minSize, minimum)
+        XCTAssertEqual(window.maxSize, maximum)
+    }
+
+    func testCommandRotationReceivesWindowMouseEvents() throws {
+        let controller = RulerController(state: RulerInstanceState(
+            settings: RulerSettings(),
+            layout: RulerLayoutState(zeroPoint: NSPoint(x: 700, y: 600),
+                                     horizontalLength: 400, verticalLength: 300)
+        ))
+        let window = controller.rulerWindow
+        let handle = try XCTUnwrap(resizeHandle(in: window.horizontalRule))
+        for step in 1...4 {
+            let start = handle.convert(NSPoint(x: handle.bounds.midX, y: handle.bounds.midY), to: nil)
+            let origin = window.zeroPoint()
+            let screenStart = window.convertPoint(toScreen: start)
+            window.sendEvent(mouseEvent(type: .leftMouseDown, location: start,
+                windowNumber: window.windowNumber, timestamp: 0, modifierFlags: .command))
+            let x = screenStart.x - origin.x
+            let y = screenStart.y - origin.y
+            let angle: CGFloat = .pi / 6
+            let target = NSPoint(x: origin.x + x * cos(angle) - y * sin(angle),
+                                 y: origin.y + x * sin(angle) + y * cos(angle))
+            window.sendEvent(mouseEvent(type: .leftMouseDragged,
+                location: window.convertPoint(fromScreen: target), windowNumber: window.windowNumber,
+                timestamp: 0.1, modifierFlags: .command))
+            window.sendEvent(mouseEvent(type: .leftMouseUp,
+                location: window.convertPoint(fromScreen: target), windowNumber: window.windowNumber,
+                timestamp: 0.2, modifierFlags: .command))
+            XCTAssertEqual(controller.state.layout.rotationDegrees, CGFloat(step) * 30, accuracy: 0.001)
+            XCTAssertEqual(controller.state.layout.horizontalLength, 400)
+        }
+    }
+
+    func testHandleCursorChangesWithCommandModifier() throws {
+        let controller = RulerController(state: RulerInstanceState.createFromDefaults())
+        let handle = try XCTUnwrap(resizeHandle(in: controller.rulerWindow.horizontalRule))
+        defer { NSCursor.arrow.set() }
+        handle.updateCursor(modifierFlags: .command)
+        let window = controller.rulerWindow
+        let point = window.convertPoint(toScreen: handle.convert(NSPoint(x: handle.bounds.midX, y: handle.bounds.midY), to: nil))
+        let origin = window.zeroPoint()
+        let angle = atan2(point.y - origin.y, point.x - origin.x) * 180 / .pi
+        XCTAssertTrue(NSCursor.current === rulerRotationCursor(angle: angle))
+        handle.updateCursor(modifierFlags: [])
+        XCTAssertTrue(NSCursor.current === windowResizeCursor(for: .horizontal))
+    }
+
+    func testRotationCursorFollowsEitherEndAfterRulerRotation() throws {
+        let controller = RulerController(state: RulerInstanceState.createFromDefaults())
+        defer { NSCursor.arrow.set() }
+        for degrees: CGFloat in [0, 45, -120] {
+            controller.setRotation(degrees)
+            for rule in [controller.rulerWindow.horizontalRule as RuleView, controller.rulerWindow.verticalRule] {
+                let handle = try XCTUnwrap(resizeHandle(in: rule))
+                let window = controller.rulerWindow
+                let point = window.convertPoint(toScreen: handle.convert(NSPoint(x: handle.bounds.midX, y: handle.bounds.midY), to: nil))
+                let origin = window.zeroPoint()
+                let angle = atan2(point.y - origin.y, point.x - origin.x) * 180 / .pi
+                handle.updateCursor(modifierFlags: .command)
+                XCTAssertTrue(NSCursor.current === rulerRotationCursor(angle: angle))
+            }
+        }
+        XCTAssertTrue(rulerRotationCursor(angle: -90) === rulerRotationCursor(angle: 270))
+        let cursor = rulerRotationCursor()
+        let data = try XCTUnwrap(cursor.image.tiffRepresentation)
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(data: data))
+        XCTAssertNotNil(bitmap.representation(using: .png, properties: [:]))
+    }
+
+    func testCommandDraggingEitherEndRotatesWithoutResizing() throws {
+        for corner in [ZeroCorner.topLeft, .topRight, .bottomLeft, .bottomRight] {
+            for orientation in [Orientation.horizontal, .vertical] {
+                let controller = RulerController(state: RulerInstanceState(
+                    settings: RulerSettings(zeroCorner: corner),
+                    layout: RulerLayoutState(zeroPoint: NSPoint(x: 700, y: 600),
+                                             horizontalLength: 400, verticalLength: 300)
+                ))
+                let window = controller.rulerWindow
+                let rule: RuleView = orientation == .horizontal ? window.horizontalRule : window.verticalRule
+                let handle = try XCTUnwrap(resizeHandle(in: rule))
+                for initialAngle: CGFloat in [0, 37.5, -170] {
+                    controller.setRotation(initialAngle)
+                    let origin = window.zeroPoint()
+                    let start = window.convertPoint(toScreen: handle.convert(
+                        NSPoint(x: handle.bounds.midX, y: handle.bounds.midY), to: nil))
+                    handle.mouseDown(with: mouseEvent(type: .leftMouseDown,
+                        location: window.convertPoint(fromScreen: start), windowNumber: window.windowNumber,
+                        timestamp: 0, modifierFlags: .command))
+                    // Cross atan2's wrap boundary as well as testing fractional angles.
+                    for delta: CGFloat in [20, -35.5, 179] {
+                        let radians = delta * .pi / 180
+                        let x = start.x - origin.x
+                        let y = start.y - origin.y
+                        let target = NSPoint(x: origin.x + x * cos(radians) - y * sin(radians),
+                                             y: origin.y + x * sin(radians) + y * cos(radians))
+                        handle.mouseDragged(with: mouseEvent(type: .leftMouseDragged,
+                            location: window.convertPoint(fromScreen: target), windowNumber: window.windowNumber,
+                            timestamp: 0.1))
+                        XCTAssertEqual(controller.state.layout.rotationDegrees,
+                            (initialAngle + delta).truncatingRemainder(dividingBy: 360), accuracy: 0.001)
+                        XCTAssertEqual(controller.state.layout.horizontalLength, 400, accuracy: 0.001)
+                        XCTAssertEqual(controller.state.layout.verticalLength, 300, accuracy: 0.001)
+                        XCTAssertEqual(window.zeroPoint().x, origin.x, accuracy: 0.001)
+                        XCTAssertEqual(window.zeroPoint().y, origin.y, accuracy: 0.001)
+                    }
+                    handle.mouseUp(with: mouseEvent(type: .leftMouseUp,
+                        location: window.convertPoint(fromScreen: start), windowNumber: window.windowNumber, timestamp: 0.2))
+                    // A subsequent ordinary drag must use the existing resize behavior.
+                    let nextStart = window.convertPoint(toScreen: handle.convert(
+                        NSPoint(x: handle.bounds.midX, y: handle.bounds.midY), to: nil))
+                    handle.mouseDown(with: mouseEvent(type: .leftMouseDown,
+                        location: window.convertPoint(fromScreen: nextStart), windowNumber: window.windowNumber, timestamp: 0.3))
+                    let angleBeforeResize = controller.state.layout.rotationDegrees
+                    handle.mouseDragged(with: mouseEvent(type: .leftMouseDragged,
+                        location: window.convertPoint(fromScreen: nextStart), windowNumber: window.windowNumber, timestamp: 0.4))
+                    XCTAssertEqual(controller.state.layout.rotationDegrees, angleBeforeResize)
+                    handle.mouseUp(with: mouseEvent(type: .leftMouseUp,
+                        location: window.convertPoint(fromScreen: nextStart), windowNumber: window.windowNumber, timestamp: 0.5))
+                }
+            }
+        }
+    }
+
+    func testRotatedSingleWingPreservesHiddenLengthAndSupportsAlignmentAndFlip() {
+        let controller = RulerController(state: RulerInstanceState(
+            settings: RulerSettings(),
+            layout: RulerLayoutState(zeroPoint: NSPoint(x: 700, y: 600),
+                                     horizontalLength: 400, verticalLength: 300)
+        ))
+        controller.setRotation(-32)
+        for hidden in [Orientation.horizontal, .vertical] {
+            controller.setWing(hidden, isVisible: false)
+            controller.captureCurrentState()
+            XCTAssertEqual(controller.state.layout.horizontalLength, 400, accuracy: 0.001)
+            XCTAssertEqual(controller.state.layout.verticalLength, 300, accuracy: 0.001)
+            controller.align(at: NSPoint(x: 800, y: 650))
+            controller.prepareForZeroCornerChange(to: .bottomRight)
+            XCTAssertEqual(controller.rulerWindow.zeroPoint().x, 800, accuracy: 0.001)
+            XCTAssertEqual(controller.rulerWindow.zeroPoint().y, 650, accuracy: 0.001)
+            XCTAssertEqual(controller.state.layout.rotationDegrees, -32)
+            controller.setWing(hidden, isVisible: true)
+        }
+    }
+
+    func testRotationPersistenceAndLegacyLayoutDecoding() throws {
+        var layout = RulerLayoutState(zeroPoint: NSPoint(x: 700, y: 600),
+                                      horizontalLength: 400, verticalLength: 300)
+        layout.rotationDegrees = -32.75
+        let data = try JSONEncoder().encode(layout)
+        XCTAssertEqual(try JSONDecoder().decode(RulerLayoutState.self, from: data), layout)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        legacy.removeValue(forKey: "rotationDegrees")
+        let restored = try JSONDecoder().decode(RulerLayoutState.self,
+            from: JSONSerialization.data(withJSONObject: legacy))
+        XCTAssertEqual(restored.rotationDegrees, 0)
+        XCTAssertEqual(restored.horizontalLength, 400)
+    }
+
     func testWindowAlphaValueConvertsPercentToAlpha() {
         XCTAssertEqual(windowAlphaValue(0), 0.0)
         XCTAssertEqual(windowAlphaValue(50), 0.5)
@@ -3787,12 +4051,13 @@ final class RulerCoreTests: XCTestCase {
         type: NSEvent.EventType,
         location: NSPoint,
         windowNumber: Int,
-        timestamp: TimeInterval
+        timestamp: TimeInterval,
+        modifierFlags: NSEvent.ModifierFlags = []
     ) -> NSEvent {
         return NSEvent.mouseEvent(
             with: type,
             location: location,
-            modifierFlags: [],
+            modifierFlags: modifierFlags,
             timestamp: timestamp,
             windowNumber: windowNumber,
             context: nil,

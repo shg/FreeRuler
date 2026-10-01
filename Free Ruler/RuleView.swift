@@ -464,6 +464,14 @@ class RuleView: NSView {
         updateBorderFrame()
     }
 
+    func resizeHandle(atWindowPoint point: NSPoint) -> ResizeHandleView? {
+        guard let handle = resizeHandleView,
+              !handle.isHidden,
+              bounds.contains(convert(point, from: nil)),
+              handle.bounds.contains(handle.convert(point, from: nil)) else { return nil }
+        return handle
+    }
+
     func installResizeHandle(for orientation: Orientation) {
         let view = ResizeHandleView(orientation: orientation, color: color)
         addSubview(view)

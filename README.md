@@ -12,6 +12,7 @@ A ruler application for macOS
 - Move rulers independently or as a group (press G to toggle).
 - Show, hide, and reopen rulers from the menu or keyboard.
 - Drag the end of each ruler to resize.
+- Hold Command and drag the end of either ruler arm to rotate around its origin. Rotation is saved with each ruler.
 - Show or hide the shadow behind rulers (press S to toggle).
 - Align rulers at mouse location (press O for origin).
 - Reset ruler locations with Command-R.

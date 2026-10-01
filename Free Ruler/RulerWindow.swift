@@ -267,6 +267,71 @@ final class RulerWindow: NSPanel {
     let verticalRule: VerticalRule
 
     private let rulerContentView: RulerContentView
+    private var rotationHost: NSView?
+    private(set) var rotationDegrees: CGFloat = 0
+
+    func applyRotation(layout: RulerLayoutState, display: Bool) {
+        let logicalLayout = layout.layout(zeroCorner: settings.zeroCorner)
+        let logicalFrame = visibleFrame(in: logicalLayout)
+        rotationDegrees = layout.rotationDegrees
+        if rotationDegrees == 0 {
+            rulerContentView.frameRotation = 0
+            rulerContentView.removeFromSuperview()
+            contentView = rulerContentView
+            rotationHost = nil
+            updateSizeConstraintsForVisibleRules()
+            // Remove floating-point rotation error before AppKit rounds the window frame.
+            let origin = NSPoint(x: logicalFrame.minX.rounded(), y: logicalFrame.minY.rounded())
+            let size = NSSize(
+                width: abs(logicalFrame.width - logicalFrame.width.rounded()) < 0.000001
+                    ? logicalFrame.width.rounded() : logicalFrame.width,
+                height: abs(logicalFrame.height - logicalFrame.height.rounded()) < 0.000001
+                    ? logicalFrame.height.rounded() : logicalFrame.height
+            )
+            setFrame(NSRect(origin: origin, size: size), display: false)
+            rulerContentView.frame = NSRect(origin: .zero, size: size)
+            rulerContentView.bounds = NSRect(origin: .zero, size: size)
+            rulerContentView.needsLayout = true
+            rulerContentView.layoutSubtreeIfNeeded()
+            if display { displayIfNeeded() }
+            return
+        }
+        let radians = layout.rotationDegrees * .pi / 180
+        let corners = [NSPoint(x: logicalFrame.minX, y: logicalFrame.minY),
+                       NSPoint(x: logicalFrame.maxX, y: logicalFrame.minY),
+                       NSPoint(x: logicalFrame.minX, y: logicalFrame.maxY),
+                       NSPoint(x: logicalFrame.maxX, y: logicalFrame.maxY)]
+        let rotated = corners.map { point -> NSPoint in
+            let x = point.x - layout.zeroPoint.x
+            let y = point.y - layout.zeroPoint.y
+            return NSPoint(x: layout.zeroPoint.x + x * cos(radians) - y * sin(radians),
+                           y: layout.zeroPoint.y + x * sin(radians) + y * cos(radians))
+        }
+        let minX = rotated.map(\.x).min()!
+        let minY = rotated.map(\.y).min()!
+        let maxX = rotated.map(\.x).max()!
+        let maxY = rotated.map(\.y).max()!
+        if rotationHost == nil {
+            let host = NSView(frame: .zero)
+            rulerContentView.removeFromSuperview()
+            contentView = host
+            host.addSubview(rulerContentView)
+            rotationHost = host
+        }
+        updateSizeConstraintsForVisibleRules()
+        super.setFrame(NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY).integral, display: false)
+        rotationHost?.frame = NSRect(origin: .zero, size: frame.size)
+        rulerContentView.frameRotation = 0
+        rulerContentView.frame = NSRect(origin: .zero, size: logicalFrame.size)
+        rulerContentView.bounds = NSRect(origin: .zero, size: logicalFrame.size)
+        rulerContentView.needsLayout = true
+        rulerContentView.layoutSubtreeIfNeeded()
+        rulerContentView.frameRotation = layout.rotationDegrees
+        rulerContentView.setFrameOrigin(NSPoint(x: rotated[0].x - frame.minX, y: rotated[0].y - frame.minY))
+        rulerContentView.needsDisplay = true
+        if display { displayIfNeeded() }
+    }
+
     private(set) var settings: RulerSettings
 
     init(frame: NSRect, settings: RulerSettings = RulerSettings(defaults: prefs)) {
@@ -345,6 +410,45 @@ final class RulerWindow: NSPanel {
         updateRulerContentFrame()
     }
 
+    private weak var draggedHandle: ResizeHandleView?
+
+    override func sendEvent(_ event: NSEvent) {
+        // Convert directly to handle coordinates: hitTest can miss a rotated view.
+        if event.type == .leftMouseDown,
+           event.modifierFlags.contains(.command) || rotationDegrees != 0,
+           let handle = resizeHandle(atWindowPoint: event.locationInWindow) {
+            draggedHandle = handle
+            handle.mouseDown(with: event)
+            return
+        }
+        if let handle = draggedHandle {
+            if event.type == .leftMouseDragged {
+                handle.mouseDragged(with: event)
+                return
+            }
+            if event.type == .leftMouseUp {
+                draggedHandle = nil
+                handle.mouseUp(with: event)
+                return
+            }
+        }
+        super.sendEvent(event)
+        if event.type == .mouseMoved || event.type == .flagsChanged {
+            let point = event.type == .flagsChanged ? mouseLocationOutsideOfEventStream : event.locationInWindow
+            resizeHandle(atWindowPoint: point)?.updateCursor(modifierFlags: event.modifierFlags)
+        }
+    }
+
+    private func resizeHandle(atWindowPoint point: NSPoint) -> ResizeHandleView? {
+        if isRuleVisible(.horizontal), let handle = horizontalRule.resizeHandle(atWindowPoint: point) {
+            return handle
+        }
+        if isRuleVisible(.vertical), let handle = verticalRule.resizeHandle(atWindowPoint: point) {
+            return handle
+        }
+        return nil
+    }
+
     override func mouseDown(with event: NSEvent) {
         nextResponder?.mouseDown(with: event)
         super.mouseDown(with: event)
@@ -398,7 +502,15 @@ final class RulerWindow: NSPanel {
     }
 
     func screenFrame(for orientation: Orientation) -> NSRect {
-        return convertToScreen(rulerContentView.localFrame(for: orientation))
+        let windowFrame = rulerContentView.convert(rulerContentView.localFrame(for: orientation), to: nil)
+        return convertToScreen(windowFrame)
+    }
+
+    func length(for orientation: Orientation) -> CGFloat {
+        let localFrame = rulerContentView.localFrame(for: orientation)
+        let length = orientation == .horizontal ? localFrame.width : localFrame.height
+        // Avoid an extra pixel when AppKit rounds a length just above an integer.
+        return abs(length - length.rounded()) < 0.000001 ? length.rounded() : length
     }
 
     func visibleFrame(in layout: RulerWindowLayout) -> NSRect {
@@ -432,6 +544,11 @@ final class RulerWindow: NSPanel {
 
     func zeroPoint() -> NSPoint {
         let geometry = ZeroCornerGeometry(zeroCorner: settings.zeroCorner)
+        if rotationHost != nil {
+            let orientation: Orientation = isRuleVisible(.horizontal) ? .horizontal : .vertical
+            let localZero = geometry.zeroPoint(in: rulerContentView.localFrame(for: orientation), for: orientation)
+            return convertPoint(toScreen: rulerContentView.convert(localZero, to: nil))
+        }
 
         if isRuleVisible(.horizontal) {
             return geometry.zeroPoint(
@@ -468,16 +585,29 @@ final class RulerWindow: NSPanel {
     }
 
     private func updateSizeConstraintsForVisibleRules() {
-        minSize = RulerWindowLayout.minSize(
+        let minimum = RulerWindowLayout.minSize(
             zeroCorner: settings.zeroCorner,
             showsHorizontalRule: rulerContentView.showsHorizontalRule,
             showsVerticalRule: rulerContentView.showsVerticalRule
         )
-        maxSize = RulerWindowLayout.maxSize(
+        let maximum = RulerWindowLayout.maxSize(
             zeroCorner: settings.zeroCorner,
             showsHorizontalRule: rulerContentView.showsHorizontalRule,
             showsVerticalRule: rulerContentView.showsVerticalRule
         )
+        if rotationDegrees == 0 {
+            minSize = minimum
+            maxSize = maximum
+        } else {
+            let radians = rotationDegrees * .pi / 180
+            let cosine = abs(cos(radians))
+            let sine = abs(sin(radians))
+            // Window constraints bound the rotated rectangle; handles constrain arm lengths.
+            minSize = NSSize(width: floor(minimum.width * cosine + minimum.height * sine),
+                             height: floor(minimum.width * sine + minimum.height * cosine))
+            maxSize = NSSize(width: ceil(maximum.width * cosine + maximum.height * sine),
+                             height: ceil(maximum.width * sine + maximum.height * cosine))
+        }
     }
 }
 
@@ -1145,6 +1275,7 @@ final class RulerController: NSWindowController, NSWindowDelegate, NotificationO
     private var keyListener: Any?
     private var mouseInteraction: RulerMouseInteractionState!
     private var isMouseTickDrawingEnabled = true
+    private var isApplyingState = false
     private let rulerInteractionSuspensionOwners = NSHashTable<AnyObject>.weakObjects()
     private let followsDefaultPreferences: Bool
 
@@ -1268,8 +1399,14 @@ final class RulerController: NSWindowController, NSWindowDelegate, NotificationO
     }
 
     func align(at point: NSPoint) {
-        let horizontalLength = rulerWindow.screenFrame(for: .horizontal).width
-        let verticalLength = rulerWindow.screenFrame(for: .vertical).height
+        if state.layout.rotationDegrees != 0 {
+            state.layout.zeroPoint = point
+            applyStateToWindow(display: true)
+            notifyStateChanged()
+            return
+        }
+        let horizontalLength = rulerWindow.length(for: .horizontal)
+        let verticalLength = rulerWindow.length(for: .vertical)
         let layout = RulerWindowLayout.layout(
             horizontalLength: horizontalLength,
             verticalLength: verticalLength,
@@ -1283,9 +1420,15 @@ final class RulerController: NSWindowController, NSWindowDelegate, NotificationO
     }
 
     func prepareForZeroCornerChange(to zeroCorner: ZeroCorner) {
+        if state.layout.rotationDegrees != 0 {
+            state.settings.zeroCorner = zeroCorner
+            applyStateToWindow(display: true)
+            notifyStateChanged()
+            return
+        }
         let zeroPoint = rulerWindow.zeroPoint()
-        let horizontalLength = rulerWindow.screenFrame(for: .horizontal).width
-        let verticalLength = rulerWindow.screenFrame(for: .vertical).height
+        let horizontalLength = rulerWindow.length(for: .horizontal)
+        let verticalLength = rulerWindow.length(for: .vertical)
         let layout = RulerWindowLayout.layout(
             horizontalLength: horizontalLength,
             verticalLength: verticalLength,
@@ -1353,11 +1496,21 @@ final class RulerController: NSWindowController, NSWindowDelegate, NotificationO
         let minVerticalLength = getMinSize(ruler: Ruler(.vertical)).height
         let maxVerticalLength = getMaxSize(ruler: Ruler(.vertical)).height
 
+        let rotation = state.layout.rotationDegrees
         state.layout = RulerLayoutState(
             zeroPoint: rulerWindow.zeroPoint(),
             horizontalLength: min(max(horizontalLength, minHorizontalLength), maxHorizontalLength),
             verticalLength: min(max(verticalLength, minVerticalLength), maxVerticalLength)
         )
+        state.layout.rotationDegrees = rotation
+        applyStateToWindow(display: true)
+        notifyStateChanged()
+    }
+
+    func setRotation(_ degrees: CGFloat) {
+        guard degrees.isFinite else { return }
+        state.layout.zeroPoint = rulerWindow.zeroPoint()
+        state.layout.rotationDegrees = degrees.truncatingRemainder(dividingBy: 360)
         applyStateToWindow(display: true)
         notifyStateChanged()
     }
@@ -1403,6 +1556,8 @@ final class RulerController: NSWindowController, NSWindowDelegate, NotificationO
     }
 
     private func applyStateToWindow(display: Bool) {
+        isApplyingState = true
+        defer { isApplyingState = false }
         let zeroCorner = state.settings.zeroCorner
         let layout = state.layout.layout(zeroCorner: zeroCorner)
         rulerWindow.apply(settings: state.settings)
@@ -1414,25 +1569,31 @@ final class RulerController: NSWindowController, NSWindowDelegate, NotificationO
             vertical: state.visibility.showsVertical
         )
         updateMouseTickDrawingVisibility()
-        rulerWindow.setFrame(
-            layout.visibleFrame(
-                showsHorizontalRule: state.visibility.showsHorizontal,
-                showsVerticalRule: state.visibility.showsVertical
-            ),
-            display: display
-        )
+        if state.layout.rotationDegrees != 0 || rulerWindow.rotationDegrees != 0 {
+            rulerWindow.applyRotation(layout: state.layout, display: display)
+        } else {
+            rulerWindow.setFrame(
+                layout.visibleFrame(
+                    showsHorizontalRule: state.visibility.showsHorizontal,
+                    showsVerticalRule: state.visibility.showsVertical
+                ),
+                display: display
+            )
+        }
         rulerWindow.updateLayoutForCurrentZeroCorner()
     }
 
     private func captureStateFromWindow() {
+        guard !isApplyingState else { return }
+        let rotation = state.layout.rotationDegrees
         var horizontalLength = state.layout.horizontalLength
         var verticalLength = state.layout.verticalLength
 
         if rulerWindow.isRuleVisible(.horizontal) {
-            horizontalLength = rulerWindow.screenFrame(for: .horizontal).width
+            horizontalLength = rulerWindow.length(for: .horizontal)
         }
         if rulerWindow.isRuleVisible(.vertical) {
-            verticalLength = rulerWindow.screenFrame(for: .vertical).height
+            verticalLength = rulerWindow.length(for: .vertical)
         }
 
         state.layout = RulerLayoutState(
@@ -1440,6 +1601,7 @@ final class RulerController: NSWindowController, NSWindowDelegate, NotificationO
             horizontalLength: horizontalLength,
             verticalLength: verticalLength
         )
+        state.layout.rotationDegrees = rotation
         state.visibility = RulerWingVisibility(
             horizontal: rulerWindow.isRuleVisible(.horizontal),
             vertical: rulerWindow.isRuleVisible(.vertical)

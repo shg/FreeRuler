@@ -277,6 +277,20 @@ struct RulerWingVisibility: Equatable, Codable {
 }
 
 struct RulerLayoutState: Equatable, Codable {
+    var rotationDegrees: CGFloat = 0
+
+    private enum CodingKeys: String, CodingKey {
+        case zeroPoint, horizontalLength, verticalLength, rotationDegrees
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        zeroPoint = try values.decode(NSPoint.self, forKey: .zeroPoint)
+        horizontalLength = try values.decode(CGFloat.self, forKey: .horizontalLength)
+        verticalLength = try values.decode(CGFloat.self, forKey: .verticalLength)
+        rotationDegrees = try values.decodeIfPresent(CGFloat.self, forKey: .rotationDegrees) ?? 0
+    }
+
     var zeroPoint: NSPoint
     var horizontalLength: CGFloat
     var verticalLength: CGFloat

@@ -17,6 +17,8 @@ final class ResizeHandleView: NSView {
     private var trackingArea: NSTrackingArea?
     private var dragInitialMouseLocation: NSPoint?
     private var dragInitialWindowFrame: NSRect?
+    private var dragInitialLayout: RulerLayoutState?
+    private var isRotating = false
     private var wasMovableByWindowBackgroundBeforeDrag: Bool?
     private var childWindowFramesBeforeDrag: [(window: NSWindow, frame: NSRect)] = []
     private var mouseTicksSuspendedDuringResize = false
@@ -74,16 +76,31 @@ final class ResizeHandleView: NSView {
         addTrackingArea(trackingArea!)
     }
 
+    private var rotationCursor: NSCursor {
+        guard let window = window as? RulerWindow else { return rulerRotationCursor() }
+        let point = window.convertPoint(toScreen: convert(NSPoint(x: bounds.midX, y: bounds.midY), to: nil))
+        let origin = window.zeroPoint()
+        let angle = atan2(point.y - origin.y, point.x - origin.x) * 180 / .pi
+        return rulerRotationCursor(angle: angle)
+    }
+
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: windowResizeCursor(for: orientation))
+        addCursorRect(bounds, cursor: NSEvent.modifierFlags.contains(.command)
+            ? rotationCursor : windowResizeCursor(for: orientation))
     }
 
     override func cursorUpdate(with event: NSEvent) {
-        windowResizeCursor(for: orientation).set()
+        updateCursor(modifierFlags: event.modifierFlags)
+    }
+
+    func updateCursor(modifierFlags: NSEvent.ModifierFlags) {
+        let cursor = isRotating || modifierFlags.contains(.command)
+            ? rotationCursor : windowResizeCursor(for: orientation)
+        cursor.set()
     }
 
     override func mouseEntered(with event: NSEvent) {
-        windowResizeCursor(for: orientation).set()
+        updateCursor(modifierFlags: event.modifierFlags)
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -110,6 +127,9 @@ final class ResizeHandleView: NSView {
         suspendMouseTicksDuringResize()
         dragInitialMouseLocation = screenLocation(for: event, in: window)
         dragInitialWindowFrame = window.frame
+        dragInitialLayout = (window.windowController as? RulerController)?.state.layout
+        isRotating = event.modifierFlags.contains(.command)
+        updateCursor(modifierFlags: event.modifierFlags)
         wasMovableByWindowBackgroundBeforeDrag = window.isMovableByWindowBackground
 
         window.isMovableByWindowBackground = false
@@ -127,10 +147,34 @@ final class ResizeHandleView: NSView {
               let dragInitialWindowFrame = dragInitialWindowFrame else { return }
 
         let mouseLocation = screenLocation(for: event, in: window)
+        if isRotating,
+           let controller = window.windowController as? RulerController,
+           let initial = dragInitialLayout {
+            let origin = initial.zeroPoint
+            let startAngle = atan2(dragInitialMouseLocation.y - origin.y, dragInitialMouseLocation.x - origin.x)
+            let angle = atan2(mouseLocation.y - origin.y, mouseLocation.x - origin.x)
+            let change = atan2(sin(angle - startAngle), cos(angle - startAngle))
+            controller.setRotation(initial.rotationDegrees + change * 180 / .pi)
+            updateCursor(modifierFlags: event.modifierFlags)
+            return
+        }
         let delta = NSSize(
             width: mouseLocation.x - dragInitialMouseLocation.x,
             height: mouseLocation.y - dragInitialMouseLocation.y
         )
+        if let controller = window.windowController as? RulerController,
+           let initial = dragInitialLayout, initial.rotationDegrees != 0 {
+            let radians = initial.rotationDegrees * .pi / 180
+            let localX = delta.width * cos(radians) + delta.height * sin(radians)
+            let localY = -delta.width * sin(radians) + delta.height * cos(radians)
+            let direction = ZeroCornerGeometry(zeroCorner: zeroCorner).growthDirection(for: orientation)
+            let change = (orientation == .horizontal ? localX : localY) * (direction == .positive ? 1 : -1)
+            controller.updateDimensions(
+                horizontalLength: initial.horizontalLength + (orientation == .horizontal ? change : 0),
+                verticalLength: initial.verticalLength + (orientation == .vertical ? change : 0)
+            )
+            return
+        }
         let nextFrame = resizedRulerFrame(
             orientation: orientation,
             zeroCorner: zeroCorner,
@@ -167,7 +211,7 @@ final class ResizeHandleView: NSView {
         resetDragState()
         restoreRulerCursor(with: event)
         if contains(event) {
-            windowResizeCursor(for: orientation).set()
+            updateCursor(modifierFlags: event.modifierFlags)
         }
     }
 
@@ -450,6 +494,8 @@ final class ResizeHandleView: NSView {
     private func resetDragState() {
         dragInitialMouseLocation = nil
         dragInitialWindowFrame = nil
+        dragInitialLayout = nil
+        isRotating = false
         wasMovableByWindowBackgroundBeforeDrag = nil
         childWindowFramesBeforeDrag = []
     }
@@ -872,3 +918,47 @@ struct ResizeHandleCursor_Previews: PreviewProvider {
     }
 }
 #endif
+
+func rulerRotationCursor(angle: CGFloat = 0) -> NSCursor {
+    let key = (Int(angle.rounded()) % 360 + 360) % 360
+    if let cursor = RulerRotationCursor.cursors[key] { return cursor }
+    let image = NSImage(size: NSSize(width: 32, height: 32))
+    image.lockFocus()
+    let transform = NSAffineTransform()
+    transform.translateX(by: 16, yBy: 16)
+    transform.rotate(byDegrees: CGFloat(key))
+    transform.concat()
+
+    // A single outline joins the arrowheads to the shaft without overlapping strokes.
+    let radius: CGFloat = 10
+    func point(_ degrees: CGFloat, _ radius: CGFloat) -> NSPoint {
+        let radians = degrees * .pi / 180
+        return NSPoint(x: radius * cos(radians), y: radius * sin(radians))
+    }
+    let path = NSBezierPath()
+    path.move(to: point(-60, radius))
+    path.line(to: point(-30, radius + 3))
+    path.line(to: point(-30, radius + 1))
+    path.appendArc(withCenter: .zero, radius: radius + 1, startAngle: -30, endAngle: 30)
+    path.line(to: point(30, radius + 3))
+    path.line(to: point(60, radius))
+    path.line(to: point(30, radius - 3))
+    path.line(to: point(30, radius - 1))
+    path.appendArc(withCenter: .zero, radius: radius - 1, startAngle: 30, endAngle: -30, clockwise: true)
+    path.line(to: point(-30, radius - 3))
+    path.close()
+    path.lineJoinStyle = .round
+    NSColor.white.setStroke()
+    path.lineWidth = 2
+    path.stroke()
+    NSColor.black.setFill()
+    path.fill()
+    image.unlockFocus()
+    let cursor = NSCursor(image: image, hotSpot: NSPoint(x: 16, y: 16))
+    RulerRotationCursor.cursors[key] = cursor
+    return cursor
+}
+
+private enum RulerRotationCursor {
+    static var cursors: [Int: NSCursor] = [:]
+}
